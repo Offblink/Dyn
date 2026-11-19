@@ -7,7 +7,6 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
@@ -27,11 +26,15 @@ public sealed partial class MainPage : Page
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
     const int SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
 
+    enum DragMode { None, Create, Move }
+
     string? gif;
     double srcW, srcH;          // 动图原始像素
-    Rect? crop;                 // 归一化裁切区 (0~1)
-    Point? dragStart;           // 拖动起点（相对 PreviewHost）
-    Rect? dragRect;             // 拖动中的框（相对 PreviewHost）
+    Rect? crop;                 // 已确定的裁切区，归一化 0~1
+    DragMode mode;
+    Point pressPoint;           // 按下点（PreviewHost 坐标）
+    Point grabOffset;           // Move 时，按下点相对框左上角的偏移
+    Rect? live;                 // 正在拖的框（PreviewHost 坐标）
     DispatcherTimer? poll;
 
     public MainPage()
@@ -76,24 +79,24 @@ public sealed partial class MainPage : Page
         ApplyButton.IsEnabled = true;
 
         crop = null;
-        dragRect = null;
-        dragStart = null;
-        UpdateOverlay(null);
+        live = null;
+        mode = DragMode.None;
+        UpdateOverlay();
 
         var bmp = new BitmapImage();
         bmp.ImageOpened += (_, _) =>
         {
             srcW = bmp.PixelWidth;
             srcH = bmp.PixelHeight;
-            UpdateOverlay(null);
+            UpdateOverlay();
         };
         bmp.UriSource = new Uri(path);
         Preview.Source = bmp;
     }
 
-    // ── 框选 ────────────────────────────────────────────────
+    // ── 几何 ────────────────────────────────────────────────
 
-    /// <summary>动图在 PreviewHost 里的实际显示矩形（Stretch=Uniform 会留黑边）。</summary>
+    /// <summary>动图在 PreviewHost 里的实际显示矩形（Stretch=Uniform 会留边）。</summary>
     Rect ContentRect()
     {
         double hostW = PreviewHost.ActualWidth, hostH = PreviewHost.ActualHeight;
@@ -103,97 +106,147 @@ public sealed partial class MainPage : Page
         return new Rect((hostW - w) / 2, (hostH - h) / 2, w, h);
     }
 
+    Rect CropToHost(Rect c)
+    {
+        var img = ContentRect();
+        return new Rect(img.X + c.X * img.Width, img.Y + c.Y * img.Height,
+                        c.Width * img.Width, c.Height * img.Height);
+    }
+
+    Rect HostToCrop(Rect r)
+    {
+        var img = ContentRect();
+        return new Rect(
+            Math.Clamp((r.X - img.X) / img.Width, 0, 1),
+            Math.Clamp((r.Y - img.Y) / img.Height, 0, 1),
+            Math.Clamp(r.Width / img.Width, 0, 1),
+            Math.Clamp(r.Height / img.Height, 0, 1));
+    }
+
     static double ScreenAspect()
     {
         int w = GetSystemMetrics(SM_CXVIRTUALSCREEN), h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
         return w > 0 && h > 0 ? (double)w / h : 16.0 / 9.0;
     }
 
+    /// <summary>把任意大小的框按屏幕比例校正（保持中心），并收进图片范围内。</summary>
+    static Rect FitAspect(Rect r, double aspect, Rect bounds)
+    {
+        double w = r.Width, h = r.Height;
+        if (w / h > aspect) h = w / aspect; else w = h * aspect;
+        if (w > bounds.Width) { w = bounds.Width; h = w / aspect; }
+        if (h > bounds.Height) { h = bounds.Height; w = h * aspect; }
+        double x = Math.Clamp(r.X + r.Width / 2 - w / 2, bounds.X, bounds.Right - w);
+        double y = Math.Clamp(r.Y + r.Height / 2 - h / 2, bounds.Y, bounds.Bottom - h);
+        return new Rect(x, y, w, h);
+    }
+
+    static Rect ClampRect(Rect r, Rect b)
+    {
+        double w = Math.Min(r.Width, b.Width), h = Math.Min(r.Height, b.Height);
+        double x = Math.Clamp(r.X, b.X, b.Right - w);
+        double y = Math.Clamp(r.Y, b.Y, b.Bottom - h);
+        return new Rect(x, y, w, h);
+    }
+
+    // ── 指针 ────────────────────────────────────────────────
+
     void Preview_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (Preview.Source is null) return;
         var p = e.GetCurrentPoint(PreviewHost).Position;
-        if (!ContentRect().Contains(p)) return;
+        var content = ContentRect();
+        if (!content.Contains(p)) return;
 
-        dragStart = p;
-        dragRect = new Rect(p, p);
+        // 框里按下 → 移动整框；框外按下 → 重新画
+        if (crop is { } c)
+        {
+            var box = CropToHost(c);
+            if (box.Contains(p))
+            {
+                mode = DragMode.Move;
+                grabOffset = new Point(p.X - box.X, p.Y - box.Y);
+                live = box;
+                PreviewHost.CapturePointer(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+        }
+
+        mode = DragMode.Create;
+        pressPoint = p;
+        live = new Rect(p.X, p.Y, 0, 0);
         PreviewHost.CapturePointer(e.Pointer);
         e.Handled = true;
     }
 
     void Preview_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (dragStart is not { } start) return;
+        if (mode == DragMode.None) return;
 
         var p = e.GetCurrentPoint(PreviewHost).Position;
-        var c = ContentRect();
-        double aspect = ScreenAspect();
+        var content = ContentRect();
 
-        double dx = p.X - start.X, dy = p.Y - start.Y;
-        bool right = dx >= 0, down = dy >= 0;
-
-        // 先按鼠标判定以哪条边为准，再按屏幕比例补齐另一边
-        double w, h;
-        if (Math.Abs(dx) >= Math.Abs(dy) * aspect) { w = Math.Abs(dx); h = w / aspect; }
-        else { h = Math.Abs(dy); w = h * aspect; }
-
-        // 顶到图片边就整体缩回来，保证框不越界
-        w = Math.Min(w, right ? c.Right - start.X : start.X - c.Left);
-        h = Math.Min(h, down ? c.Bottom - start.Y : start.Y - c.Top);
-        w = Math.Min(w, h * aspect);
-        h = w / aspect;
-
-        dragRect = new Rect(right ? start.X : start.X - w, down ? start.Y : start.Y - h, w, h);
-        UpdateOverlay(dragRect);
+        if (mode == DragMode.Create)
+        {
+            // 角严格跟着鼠标走，松手时再按屏幕比例校正
+            double x = Math.Min(pressPoint.X, p.X), y = Math.Min(pressPoint.Y, p.Y);
+            double w = Math.Abs(p.X - pressPoint.X), h = Math.Abs(p.Y - pressPoint.Y);
+            live = ClampRect(new Rect(x, y, w, h), content);
+        }
+        else
+        {
+            var target = new Rect(p.X - grabOffset.X, p.Y - grabOffset.Y, live?.Width ?? 0, live?.Height ?? 0);
+            live = ClampRect(target, content);
+        }
+        UpdateOverlay();
         e.Handled = true;
     }
 
     void Preview_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (dragStart is null) return;
+        if (mode == DragMode.None) return;
         PreviewHost.ReleasePointerCapture(e.Pointer);
-        dragStart = null;
 
-        var c = ContentRect();
-        if (dragRect is { } r && r.Width >= 12 && c.Width > 0)
+        var content = ContentRect();
+        var r = live;
+        if (mode == DragMode.Create)
         {
-            crop = new Rect(
-                Math.Clamp((r.X - c.X) / c.Width, 0, 1),
-                Math.Clamp((r.Y - c.Y) / c.Height, 0, 1),
-                Math.Clamp(r.Width / c.Width, 0, 1),
-                Math.Clamp(r.Height / c.Height, 0, 1));
+            if (r is { } box && box.Width >= 12 && box.Height >= 12)
+                crop = HostToCrop(FitAspect(box, ScreenAspect(), content));
         }
-        dragRect = null;
-        UpdateOverlay(null);
+        else if (r is { } moved)
+        {
+            crop = HostToCrop(moved);
+        }
+
+        mode = DragMode.None;
+        live = null;
+        UpdateOverlay();
         e.Handled = true;
     }
 
-    void PreviewHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateOverlay(dragRect);
+    void PreviewHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateOverlay();
 
     void ResetCrop_Click(object sender, RoutedEventArgs e)
     {
         crop = null;
-        dragRect = null;
-        UpdateOverlay(null);
+        live = null;
+        mode = DragMode.None;
+        UpdateOverlay();
     }
 
-    /// <summary>选区 = 拖动中的框，否则 = 已确定的 crop；都没有就全部隐藏。</summary>
-    void UpdateOverlay(Rect? live)
+    /// <summary>画暗区 + 描边；优先画正在拖的框，其次画已确定的裁切区。</summary>
+    void UpdateOverlay()
     {
         var host = new Rect(0, 0, PreviewHost.ActualWidth, PreviewHost.ActualHeight);
-        Rect? sel = live;
-        if (sel is null && crop is { } c)
-        {
-            var img = ContentRect();
-            sel = new Rect(img.X + c.X * img.Width, img.Y + c.Y * img.Height,
-                           c.Width * img.Width, c.Height * img.Height);
-        }
+        Rect? sel = live ?? (crop is { } c ? CropToHost(c) : null);
 
         if (sel is not { } s || s.Width < 2 || s.Height < 2)
         {
             foreach (var r in new[] { DimTop, DimBottom, DimLeft, DimRight, SelBorder })
                 r.Visibility = Visibility.Collapsed;
-            HintText.Text = "在预览里拖一块区域，就只显示那块（比例自动锁定屏幕）";
+            HintText.Text = "在预览里拖出选框；框好后拖框内可移动（松手按屏幕比例校正）";
             ResetCropButton.IsEnabled = crop is not null;
             return;
         }
@@ -203,9 +256,14 @@ public sealed partial class MainPage : Page
         SetRect(DimLeft, new Rect(0, s.Y, s.X, s.Height));
         SetRect(DimRight, new Rect(s.Right, s.Y, Math.Max(0, host.Width - s.Right), s.Height));
         SetRect(SelBorder, s);
-        HintText.Text = crop is { } cc
-            ? $"已框选 {cc.Width * 100:0.#}% × {cc.Height * 100:0.#}%（点「设为桌面壁纸」生效）"
-            : "松开鼠标确定选区";
+
+        var img = ContentRect();
+        HintText.Text = mode switch
+        {
+            DragMode.Create => $"松开按屏幕比例成形（当前 {s.Width / img.Width * 100:0}% 宽）",
+            DragMode.Move => $"移动中：{s.Width / img.Width * 100:0}% × {s.Height / img.Height * 100:0}%",
+            _ => $"已框选 {s.Width / img.Width * 100:0.#}% × {s.Height / img.Height * 100:0.#}%（框内拖动可移动）",
+        };
         ResetCropButton.IsEnabled = crop is not null;
     }
 
