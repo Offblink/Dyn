@@ -95,6 +95,6 @@ public sealed partial class MainPage : Page
     {
         if (!File.Exists(EngineExe)) return;
         bool running = Process.GetProcessesByName("Dyn.Engine").Length > 0;
-        if (running) StatusText.Text = "桌面壁纸运行中（Ctrl+Alt+Q 退出）";
+        StatusText.Text = running ? "桌面壁纸运行中（Ctrl+Alt+Q 退出）" : "已停止";
     }
 }
