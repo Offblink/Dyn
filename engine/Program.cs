@@ -20,12 +20,14 @@ internal sealed class Options
     public string? Source;
     public string? LogFile;
     public double PreviewSeconds;
+    public RectangleF? Crop;      // 归一化裁切区 (x,y,w,h)，用于把动图的一块映射到屏幕
     public bool Quit;
     public bool Help;
 
     public const string Usage =
         "Dyn —— 用自己的动图当桌面壁纸\n\n" +
         "  Dyn.exe <动画.gif> [选项]\n\n" +
+        "  --crop x,y,w,h   只显示动图的这块区域（归一化 0~1，按屏幕长宽比框选）\n" +
         "  --preview <秒>   以普通窗口预览，不接管桌面\n" +
         "  --log <文件>     把运行状态写到文件\n" +
         "  --quit           让正在运行的实例退出\n" +
@@ -47,6 +49,18 @@ internal sealed class Options
                 case "--preview":
                     if (i + 1 >= argv.Length || !double.TryParse(argv[++i], out var sec)) { err = "--preview 需要秒数"; return false; }
                     o.PreviewSeconds = sec;
+                    continue;
+                case "--crop":
+                    if (i + 1 >= argv.Length) { err = "--crop 需要 x,y,w,h"; return false; }
+                    var parts = argv[++i].Split(',');
+                    if (parts.Length != 4 ||
+                        !float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cx) ||
+                        !float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cy) ||
+                        !float.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cw) ||
+                        !float.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ch) ||
+                        cw <= 0 || ch <= 0)
+                    { err = "--crop 格式应为 x,y,w,h（0~1）"; return false; }
+                    o.Crop = new RectangleF(cx, cy, cw, ch);
                     continue;
                 case "--log":
                     if (i + 1 >= argv.Length) { err = "--log 需要文件路径"; return false; }
@@ -126,7 +140,7 @@ internal static class Fit
 /// <summary>
 /// GIF 帧 → D3D11 交换链 → DirectComposition 视觉。
 /// 24H2+ 的壁纸层只认 DComp：GDI / UpdateLayeredWindow / SetLayeredWindowAttributes 都不会被合成。
-/// 交换链按动图原始尺寸建，缩放交给 DComp 的视觉矩阵（GPU），每帧只上传几百 KB。
+/// 交换链按裁切区尺寸建，缩放交给 DComp 的视觉矩阵（GPU），每帧只上传几百 KB。
 /// </summary>
 internal sealed class DcompSurface : IDisposable
 {
@@ -140,14 +154,16 @@ internal sealed class DcompSurface : IDisposable
     readonly Bitmap scratch;
     readonly Graphics scratchGraphics;
     readonly byte[] pixels;
+    readonly Rectangle crop;
     readonly int w, h;
 
     public long Presented { get; private set; }
 
-    public DcompSurface(IntPtr hwnd, int gifW, int gifH, int screenW, int screenH, Action<string> log)
+    public DcompSurface(IntPtr hwnd, Rectangle crop, int screenW, int screenH, Action<string> log)
     {
-        w = gifW;
-        h = gifH;
+        this.crop = crop;
+        w = crop.Width;
+        h = crop.Height;
 
         D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
             new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 },
@@ -178,7 +194,7 @@ internal sealed class DcompSurface : IDisposable
             (screenW - w * scale) / 2f, (screenH - h * scale) / 2f));
         target.SetRoot(visual);
         dcomp.Commit();
-        log($"dcomp 就绪 交换链={w}x{h} 放大={scale:F3}");
+        log($"dcomp 就绪 交换链={w}x{h} 裁切={crop} 放大={scale:F3}");
 
         staging = device.CreateTexture2D(new Texture2DDescription
         {
@@ -202,7 +218,7 @@ internal sealed class DcompSurface : IDisposable
 
     public void Present(Image frame)
     {
-        scratchGraphics.DrawImage(frame, new Rectangle(0, 0, w, h));
+        scratchGraphics.DrawImage(frame, new Rectangle(0, 0, w, h), crop, GraphicsUnit.Pixel);
 
         var data = scratch.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
@@ -406,10 +422,13 @@ internal static class Program
 
         AttachToDesktop(hwnd, vw, vh);
 
+        var crop = ResolveCrop(player, opt, vw, vh);
+        Log($"裁切区 {crop} （动图 {player.Width}x{player.Height}）");
+
         DcompSurface surface;
         try
         {
-            surface = new DcompSurface(hwnd, player.Width, player.Height, vw, vh, Log);
+            surface = new DcompSurface(hwnd, crop, vw, vh, Log);
         }
         catch (Exception ex)
         {
@@ -458,6 +477,22 @@ internal static class Program
         player.Dispose();
         Log($"exit, 共提交 {surface.Presented} 帧");
         return 0;
+    }
+
+    /// <summary>把 --crop（归一化）换算成动图像素矩形；没给就用居中铺满的裁切块。</summary>
+    static Rectangle ResolveCrop(GifPlayer player, Options opt, int vw, int vh)
+    {
+        if (opt.Crop is not { } c) return Fit.Cover(player.Width, player.Height, vw, vh);
+
+        int x = (int)Math.Round(c.X * player.Width);
+        int y = (int)Math.Round(c.Y * player.Height);
+        int w = Math.Max(1, (int)Math.Round(c.Width * player.Width));
+        int h = Math.Max(1, (int)Math.Round(c.Height * player.Height));
+        x = Math.Clamp(x, 0, player.Width - 1);
+        y = Math.Clamp(y, 0, player.Height - 1);
+        w = Math.Min(w, player.Width - x);
+        h = Math.Min(h, player.Height - y);
+        return new Rectangle(x, y, w, h);
     }
 
     /// <summary>当前 z 序里紧挨在 hwnd 上面的那个兄弟窗口。</summary>

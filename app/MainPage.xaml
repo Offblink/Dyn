@@ -8,7 +8,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Padding="28" RowSpacing="18">
+    <Grid Padding="28" RowSpacing="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -16,9 +16,11 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Spacing="6">
+        <StackPanel Grid.Row="0" Spacing="4">
             <TextBlock Text="选一个 GIF 应用到桌面。图标照常显示、照常可点；按 Ctrl+Alt+Q 或点「停止」恢复原壁纸。"
                        Opacity="0.7" TextWrapping="Wrap" />
+            <TextBlock x:Name="HintText" Text="在预览里拖一块区域，就只显示那块（比例自动锁定屏幕）"
+                       Opacity="0.5" FontSize="12" />
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
@@ -29,11 +31,27 @@
         </StackPanel>
 
         <Border Grid.Row="2" CornerRadius="12" Background="#14000000" BorderThickness="1" BorderBrush="#22000000">
-            <Image x:Name="Preview" Stretch="Uniform" Margin="10" />
+            <Grid x:Name="PreviewHost" Background="Transparent"
+                  PointerPressed="Preview_PointerPressed"
+                  PointerMoved="Preview_PointerMoved"
+                  PointerReleased="Preview_PointerReleased"
+                  PointerCaptureLost="Preview_PointerReleased"
+                  SizeChanged="PreviewHost_SizeChanged">
+                <Image x:Name="Preview" Stretch="Uniform" />
+
+                <Canvas x:Name="Overlay" IsHitTestVisible="False">
+                    <Rectangle x:Name="DimTop" Fill="#73000000" Visibility="Collapsed" />
+                    <Rectangle x:Name="DimBottom" Fill="#73000000" Visibility="Collapsed" />
+                    <Rectangle x:Name="DimLeft" Fill="#73000000" Visibility="Collapsed" />
+                    <Rectangle x:Name="DimRight" Fill="#73000000" Visibility="Collapsed" />
+                    <Rectangle x:Name="SelBorder" Stroke="#FFFFFF" StrokeThickness="2" Visibility="Collapsed" />
+                </Canvas>
+            </Grid>
         </Border>
 
         <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -41,7 +59,9 @@
 
             <Button x:Name="ApplyButton" Content="设为桌面壁纸" Click="Apply_Click" IsEnabled="False" />
             <Button x:Name="StopButton" Grid.Column="1" Content="停止" Click="Stop_Click" Margin="12,0,0,0" />
-            <TextBlock x:Name="StatusText" Grid.Column="2" Text="已停止" VerticalAlignment="Center"
+            <Button x:Name="ResetCropButton" Grid.Column="2" Content="清除选区" Click="ResetCrop_Click"
+                    Margin="12,0,0,0" IsEnabled="False" />
+            <TextBlock x:Name="StatusText" Grid.Column="3" Text="已停止" VerticalAlignment="Center"
                        HorizontalAlignment="Right" Opacity="0.7" />
         </Grid>
     </Grid>
