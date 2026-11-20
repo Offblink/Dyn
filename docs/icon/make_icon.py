@@ -71,6 +71,15 @@ def render(size: int = S) -> Image.Image:
         y = top + stroke / 2 + (bottom - top - stroke) * t
         gd.ellipse([x - r, y - r, x + r, y + r], fill=INK)
 
+    # 按包围盒放大 64% 高并整体居中（手算坐标会偏左）
+    box = glyph.getbbox()
+    g = glyph.crop(box)
+    target_h = int(size * 0.64)
+    k = target_h / g.height
+    g = g.resize((round(g.width * k), target_h), Image.LANCZOS)
+    glyph = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    glyph.paste(g, ((size - g.width) // 2, (size - g.height) // 2))
+
     img.alpha_composite(glyph)
 
     # 内侧低透明描边，压住边缘
