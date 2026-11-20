@@ -4,6 +4,8 @@
 
 A minimal live-wallpaper app for Windows 11 — play your own GIF behind the desktop icons.
 
+**[⬇ Download / 下载最新版](https://github.com/Offblink/Dyn/releases/latest)**
+
 ![界面](docs/readme/app.png)
 
 ## 特点
@@ -34,7 +36,7 @@ Dyn.Engine.exe demo.gif --log run.log
 ## 环境
 
 - Windows 11 24H2 或更高（开发验证：26300）
-- 运行不需要安装：`Dyn.exe` 同目录的整套文件一起拷走即可（自包含，约 340 MB）
+- 运行不需要安装：`Dyn.exe` 同目录的整套文件一起拷走即可（自包含，约 260 MB；release zip 111 MB）
 - 自己构建需要 .NET 9 SDK（引擎）和 .NET 10 SDK + Windows App SDK（界面）
 
 ## 原理
